@@ -6,6 +6,8 @@ import HomePage from "./pages/Home/page"
 import MapPage from "./pages/Map/page"
 import AdminPage from "./pages/Admin/page"
 import AboutPage from "./pages/About/page"
+import LoginPage from "./pages/Auth/Login/page"
+import ProtectedRoute from "./components/ProtectedRoute"
 
 const router = createBrowserRouter([
   {
@@ -14,9 +16,20 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <HomePage /> },
       { path: "map", element: <MapPage /> },
-      { path: "admin", element: <AdminPage /> },
       { path: "about", element: <AboutPage /> },
     ],
+  },
+  {
+    path: "/login",
+    element: <LoginPage />,
+  },
+  {
+    path: "/admin",
+    element: (
+      <ProtectedRoute>
+        <AdminPage />
+      </ProtectedRoute>
+    ),
   },
 ])
 

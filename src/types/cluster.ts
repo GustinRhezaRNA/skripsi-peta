@@ -17,7 +17,7 @@ export interface DataItem {
 }
 
 export interface ClusterRequest {
-  k: number;
+  k?: number; // Optional: server will determine K automatically if not provided
   data: DataItem[];
 }
 

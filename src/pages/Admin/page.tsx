@@ -1,15 +1,17 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { supabase } from "../../lib/supabaseClient";
+import * as XLSX from "xlsx";
 import {
   Database,
   Download,
   Upload,
-  TrendingUp,
   AlertCircle,
-  MapPin,
   Calendar,
+  LogOut,
+  FileSpreadsheet,
 } from "lucide-react";
 import { Button } from "../../components/ui/button";
-import { useClusters } from "../../hooks/useCluster";
 import type { DataItem } from "../../types/cluster";
 
 type EarthquakeData = {
@@ -43,25 +45,23 @@ function parseCSV(content: string): EarthquakeData[] {
 }
 
 export default function AdminPage() {
+  const navigate = useNavigate();
   const [earthquakeData, setEarthquakeData] = useState<EarthquakeData[]>([]);
   const [activeTab, setActiveTab] = useState<"upload" | "data" | "recent">("upload");
   const [message, setMessage] = useState<Message>(null);
   // Clustering dataset states
   const [clusterData, setClusterData] = useState<DataItem[]>([]);
-  const [clusterK, setClusterK] = useState<number>(3);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const statistics = useMemo(() => {
-    const total = earthquakeData.length;
-    const magnitudes = earthquakeData
-      .map((d) => parseFloat(d.magnitude || "0"))
-      .filter((n) => !Number.isNaN(n));
-    const avg = magnitudes.length > 0
-      ? (magnitudes.reduce((a, b) => a + b, 0) / magnitudes.length).toFixed(2)
-      : "0.00";
-    const max = magnitudes.length > 0 ? Math.max(...magnitudes).toFixed(2) : "0.00";
-    const recent = earthquakeData.slice(0, 5);
-    return { totalRecords: total, avgMagnitude: avg, highestMagnitude: max, recentEvents: recent };
-  }, [earthquakeData]);
+  const handleLogout = async () => {
+    try {
+      await supabase.auth.signOut();
+      navigate("/login");
+    } catch (error) {
+      console.error("Error logging out:", error);
+    }
+  };
+
 
   const showMessage = (m: Message, timeout = 2500) => {
     setMessage(m);
@@ -86,25 +86,40 @@ export default function AdminPage() {
   };
 
   const handleFileUpload = async (file: File) => {
-    try {
-      const text = await file.text();
-      const parsed = parseCSV(text);
-      setEarthquakeData(parsed);
-      setActiveTab("data");
-      showMessage({ type: "success", text: "Data uploaded successfully", description: `${parsed.length} records imported` });
-    } catch (e) {
-      showMessage({ type: "error", text: "Failed to read file" });
-    }
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch("https://127.0.0.1:8000/upload-cluster", {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await res.json();
+    console.log(data);
+    showMessage({
+      type: "success",
+      text: "Upload & Clustering Done",
+      description: `${data.count} items processed.`,
+    });
   };
 
   const handleClusterFileUpload = async (file: File) => {
     try {
-      const text = await file.text();
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      if (lines.length === 0) return;
-      const headers = lines[0].split(",").map((h) => h.trim());
+      const arrayBuffer = await file.arrayBuffer();
+      const workbook = XLSX.read(arrayBuffer, { type: "array" });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as any[][];
+
+      if (jsonData.length < 2) {
+        showMessage({ type: "error", text: "File is empty or invalid" });
+        return;
+      }
+
+      // Get headers from first row
+      const headers = jsonData[0].map((h: any) => String(h).trim());
+
       const required = [
-        "Kabupaten",
+        "Kabupaten/Kota",
         "Freq_Total",
         "Max_MMI",
         "Avg_MMI",
@@ -114,48 +129,118 @@ export default function AdminPage() {
         "poverty_ratio",
         "disability_ratio",
       ];
-      const missing = required.filter((r) => !headers.includes(r));
-      if (missing.length) {
-        showMessage({ type: "error", text: "Invalid clustering CSV headers", description: `Missing: ${missing.join(", ")}` }, 4000);
-        return;
-      }
-      const rows = lines.slice(1);
-      const parsed: DataItem[] = rows.map((line) => {
-        const cols = line.split(",");
-        return {
-          Kabupaten: (cols[headers.indexOf("Kabupaten")] ?? "").trim(),
-          Freq_Total: parseFloat(cols[headers.indexOf("Freq_Total")] ?? "0"),
-          Max_MMI: parseFloat(cols[headers.indexOf("Max_MMI")] ?? "0"),
-          Avg_MMI: parseFloat(cols[headers.indexOf("Avg_MMI")] ?? "0"),
-          pop_density: parseFloat(cols[headers.indexOf("pop_density")] ?? "0"),
-          sex_ratio: parseFloat(cols[headers.indexOf("sex_ratio")] ?? "0"),
-          vulnerable_age_ratio: parseFloat(cols[headers.indexOf("vulnerable_age_ratio")] ?? "0"),
-          poverty_ratio: parseFloat(cols[headers.indexOf("poverty_ratio")] ?? "0"),
-          disability_ratio: parseFloat(cols[headers.indexOf("disability_ratio")] ?? "0"),
-        } as DataItem;
+
+      // Check if required columns exist (allowing variations)
+      const columnIndices: Record<string, number> = {};
+      required.forEach((req) => {
+        const idx = headers.findIndex((h) =>
+          h === req ||
+          (req === "Kabupaten/Kota" && (h === "Kabupaten" || h === "Kota"))
+        );
+        if (idx === -1 && req !== "Kabupaten/Kota") {
+          throw new Error(`Missing column: ${req}`);
+        }
+        if (idx !== -1) {
+          columnIndices[req === "Kabupaten/Kota" ? "Kabupaten" : req] = idx;
+        }
       });
+
+      // Parse data rows for preview
+      const parsed: DataItem[] = jsonData.slice(1).map((row) => {
+        const parseValue = (val: any): number => {
+          if (typeof val === "number") return val;
+          if (typeof val === "string") {
+            // Handle comma as decimal separator
+            const normalized = val.replace(",", ".");
+            return parseFloat(normalized) || 0;
+          }
+          return 0;
+        };
+
+        return {
+          Kabupaten: String(row[columnIndices.Kabupaten] || "").trim(),
+          Freq_Total: parseValue(row[columnIndices.Freq_Total]),
+          Max_MMI: parseValue(row[columnIndices.Max_MMI]),
+          Avg_MMI: parseValue(row[columnIndices.Avg_MMI]),
+          pop_density: parseValue(row[columnIndices.pop_density]),
+          sex_ratio: parseValue(row[columnIndices.sex_ratio]),
+          vulnerable_age_ratio: parseValue(row[columnIndices.vulnerable_age_ratio]),
+          poverty_ratio: parseValue(row[columnIndices.poverty_ratio]),
+          disability_ratio: parseValue(row[columnIndices.disability_ratio]),
+        } as DataItem;
+      }).filter(item => item.Kabupaten); // Remove empty rows
+
+      // Store both parsed data and the original file
       setClusterData(parsed);
-      showMessage({ type: "success", text: "Clustering dataset loaded", description: `${parsed.length} rows` });
-    } catch (e) {
-      showMessage({ type: "error", text: "Failed to read clustering CSV" });
+      // Store file in a ref or state for later upload
+      (window as any).__clusterFile = file;
+
+      showMessage({
+        type: "success",
+        text: "Dataset loaded successfully",
+        description: `${parsed.length} kabupaten/kota imported`
+      });
+    } catch (e: any) {
+      showMessage({
+        type: "error",
+        text: "Failed to read Excel file",
+        description: e.message || "Please check file format"
+      });
     }
   };
 
   const handleRunClustering = async () => {
     if (clusterData.length === 0) {
-      showMessage({ type: "error", text: "No clustering data to process" });
+      showMessage({ type: "error", text: "No data to process", description: "Please upload Excel file first" });
       return;
     }
+
+    // Get the stored file
+    const file = (window as any).__clusterFile;
+    if (!file) {
+      showMessage({ type: "error", text: "File not found", description: "Please re-upload the Excel file" });
+      return;
+    }
+
+    setIsProcessing(true);
     try {
-      const res = await useClusters({ k: clusterK, data: clusterData });
-      if ((res as any).type === "FeatureCollection") {
-        localStorage.setItem("clusterGeoJSON", JSON.stringify(res));
-        showMessage({ type: "success", text: "Clustering updated", description: "Map data has been refreshed" });
-      } else {
-        showMessage({ type: "info", text: "Cluster response received", description: "But no FeatureCollection found" });
+      showMessage({ type: "info", text: "Processing clustering...", description: "Please wait" });
+
+      // Send file to backend via FormData
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("http://127.0.0.1:8000/upload-cluster", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
       }
-    } catch (e) {
-      showMessage({ type: "error", text: "Failed to run clustering" });
+
+      const result = await response.json();
+
+      showMessage({
+        type: "success",
+        text: "Clustering completed successfully",
+        description: `${result.count} kabupaten/kota processed and saved`
+      });
+
+      // Refresh map data
+      setTimeout(() => {
+        window.dispatchEvent(new Event('clusterUpdated'));
+      }, 1000);
+
+    } catch (e: any) {
+      console.error("Clustering error:", e);
+      showMessage({
+        type: "error",
+        text: "Clustering failed",
+        description: e.message || "Please try again"
+      });
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -214,60 +299,20 @@ export default function AdminPage() {
                 <p className="text-sm text-gray-600">Manage earthquake data and records</p>
               </div>
             </div>
-            <span className="px-4 py-2 rounded-full bg-gray-100 text-gray-700 text-sm">Admin Access</span>
-          </div>
-        </div>
-
-        {/* Statistics */}
-        <div className="grid md:grid-cols-4 gap-4 mb-8">
-          <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm text-gray-600 mb-1">Total Records</p>
-                <p className="text-gray-900 text-xl font-semibold">{statistics.totalRecords}</p>
-              </div>
-              <div className="bg-blue-100 p-2 rounded-lg">
-                <Database className="w-5 h-5 text-blue-600" />
-              </div>
-            </div>
-          </div>
-
-          <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm text-gray-600 mb-1">Avg Magnitude</p>
-                <p className="text-gray-900 text-xl font-semibold">{statistics.avgMagnitude} SR</p>
-              </div>
-              <div className="bg-green-100 p-2 rounded-lg">
-                <TrendingUp className="w-5 h-5 text-green-600" />
-              </div>
-            </div>
-          </div>
-
-          <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm text-gray-600 mb-1">Highest Magnitude</p>
-                <p className="text-gray-900 text-xl font-semibold">{statistics.highestMagnitude} SR</p>
-              </div>
-              <div className="bg-red-100 p-2 rounded-lg">
-                <AlertCircle className="w-5 h-5 text-red-600" />
-              </div>
-            </div>
-          </div>
-
-          <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm text-gray-600 mb-1">Data Source</p>
-                <p className="text-gray-900 text-xl font-semibold">CSV</p>
-              </div>
-              <div className="bg-purple-100 p-2 rounded-lg">
-                <Upload className="w-5 h-5 text-purple-600" />
-              </div>
+            <div className="flex items-center gap-3">
+              <span className="px-4 py-2 rounded-full bg-gray-100 text-gray-700 text-sm">Admin Access</span>
+              <Button
+                variant="outline"
+                onClick={handleLogout}
+                className="gap-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+              >
+                <LogOut className="w-4 h-4" />
+                Logout
+              </Button>
             </div>
           </div>
         </div>
+
 
         {/* Tabs */}
         <div>
@@ -275,7 +320,6 @@ export default function AdminPage() {
             {([
               { id: "upload", label: "Upload Data", icon: Upload },
               { id: "data", label: "View Data", icon: Database },
-              { id: "recent", label: "Recent Events", icon: Calendar },
             ] as const).map((tab) => (
               <button
                 key={tab.id}
@@ -292,78 +336,41 @@ export default function AdminPage() {
           {/* Upload Tab */}
           {activeTab === "upload" && (
             <div className="space-y-6">
-              <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
-                <div className="flex items-start justify-between mb-6">
-                  <div>
-                    <h2 className="text-gray-900 font-semibold mb-2">Upload Earthquake Data</h2>
-                    <p className="text-sm text-gray-600">
-                      Upload CSV file with earthquake records. Make sure your file follows the template format.
-                    </p>
-                  </div>
-                  <Button variant="outline" onClick={handleDownloadTemplate} className="gap-2">
-                    <Download className="w-4 h-4" />
-                    Download Template
-                  </Button>
-                </div>
-
-                <div className="rounded-lg border border-dashed p-6 text-center">
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) handleFileUpload(file);
-                    }}
-                  />
-                  <p className="text-xs text-gray-500 mt-2">CSV only for now</p>
-                </div>
-
-                {/* Format Info */}
-                <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                  <h3 className="text-blue-900 font-medium mb-2">Required Format</h3>
-                  <p className="text-sm text-blue-800 mb-3">
-                    Your CSV should contain the following columns:
-                  </p>
-                  <div className="grid md:grid-cols-2 gap-2 text-sm">
-                    {[
-                      ["date", "YYYY-MM-DD"],
-                      ["time", "HH:MM:SS"],
-                      ["latitude", "Decimal degrees"],
-                      ["longitude", "Decimal degrees"],
-                      ["magnitude", "Richter scale"],
-                      ["depth", "Kilometers"],
-                      ["location", "Place name"],
-                    ].map(([col, desc]) => (
-                      <div key={col} className="flex items-center gap-2">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded border text-xs">{col}</span>
-                        <span className="text-blue-700">{desc}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
 
               {/* Clustering dataset uploader */}
               <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
                 <div className="flex items-start justify-between mb-6">
                   <div>
-                    <h2 className="text-gray-900 font-semibold mb-2">Upload Clustering Dataset</h2>
-                    <p className="text-sm text-gray-600">CSV with aggregated indicators per Kabupaten to feed K-Means.</p>
+                    <h2 className="text-gray-900 font-semibold mb-2">Upload Data Kabupaten/Kota</h2>
+                    <p className="text-sm text-gray-600">
+                      Upload file Excel dengan data agregat per Kabupaten/Kota untuk clustering K-Means.
+                    </p>
                   </div>
                   <Button
                     variant="outline"
                     onClick={() => {
-                      const template =
-                        "Kabupaten,Freq_Total,Max_MMI,Avg_MMI,pop_density,sex_ratio,vulnerable_age_ratio,poverty_ratio,disability_ratio\n" +
-                        "Kabupaten Bandung,73,4,3.03,6.45,105.4,79.89,10.36,11.9\n" +
-                        "Kabupaten Garut,108,4,3.06,8.41,105.1,80.34,9.98,8.76";
-                      const blob = new Blob([template], { type: "text/csv" });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement("a");
-                      a.href = url;
-                      a.download = "clustering_dataset_template.csv";
-                      a.click();
-                      URL.revokeObjectURL(url);
+                      // Create sample Excel template
+                      const ws_data = [
+                        [
+                          "Kabupaten/Kota",
+                          "Freq_Total",
+                          "Max_MMI",
+                          "Avg_MMI",
+                          "pop_density",
+                          "sex_ratio",
+                          "vulnerable_age_ratio",
+                          "poverty_ratio",
+                          "disability_ratio",
+                        ],
+                        ["Kabupaten Bandung", 73, 4, 3.03, 6.45, 105.4, 79.89, 10.36, 11.9],
+                        ["Kabupaten Bandung Barat", 14, 3, 3, 13.7, 104.3, 78.73, 10.49, 10.64],
+                        ["Kabupaten Bekasi", 1, 3, 3, 25.41, 103.2, 64.33, 4.82, 8.93],
+                      ];
+                      const ws = XLSX.utils.aoa_to_sheet(ws_data);
+                      const wb = XLSX.utils.book_new();
+                      XLSX.utils.book_append_sheet(wb, ws, "Data Clustering");
+                      XLSX.writeFile(wb, "template_clustering_jabar.xlsx");
+                      showMessage({ type: "success", text: "Template downloaded" });
                     }}
                     className="gap-2"
                   >
@@ -372,41 +379,130 @@ export default function AdminPage() {
                 </div>
 
                 <div className="grid md:grid-cols-2 gap-6">
-                  <div className="rounded-lg border border-dashed p-6">
-                    <label className="block text-sm font-medium mb-2">Upload CSV</label>
-                    <input
-                      type="file"
-                      accept=".csv,text/csv"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) handleClusterFileUpload(file);
-                      }}
-                    />
-                    <p className="text-xs text-gray-500 mt-2">Headers must match template exactly</p>
+                  <div className="rounded-lg border-2 border-dashed border-gray-300 p-6 hover:border-blue-400 transition-colors">
+                    <div className="text-center">
+                      <FileSpreadsheet className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                      <label className="block text-sm font-medium mb-3 cursor-pointer">
+                        <span className="text-blue-600 hover:text-blue-700">Click to upload</span> or drag and drop
+                      </label>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) handleClusterFileUpload(file);
+                        }}
+                        className="hidden"
+                        id="cluster-file-upload"
+                      />
+                      <label
+                        htmlFor="cluster-file-upload"
+                        className="block w-full"
+                      >
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="w-full"
+                          onClick={() => document.getElementById("cluster-file-upload")?.click()}
+                        >
+                          Select Excel File
+                        </Button>
+                      </label>
+                      <p className="text-xs text-gray-500 mt-3">
+                        Excel files only (.xlsx, .xls)
+                      </p>
+                    </div>
                     {clusterData.length > 0 && (
-                      <p className="text-xs text-green-700 mt-2">Loaded {clusterData.length} rows</p>
+                      <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                        <p className="text-sm text-green-800 font-medium">
+                          ✓ {clusterData.length} Kabupaten/Kota loaded
+                        </p>
+                        <p className="text-xs text-green-700 mt-1">
+                          Ready to process clustering
+                        </p>
+                      </div>
                     )}
                   </div>
 
-                  <div className="rounded-lg border p-6 bg-gray-50">
-                    <label className="block text-sm font-medium mb-2">K (number of clusters)</label>
-                    <input
-                      type="number"
-                      min={2}
-                      max={8}
-                      value={clusterK}
-                      onChange={(e) => setClusterK(parseInt(e.target.value || "3"))}
-                      className="w-28 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                    <div className="mt-4">
-                      <Button onClick={handleRunClustering} className="gap-2">
-                        <Upload className="w-4 h-4" /> Run Clustering & Update Map
-                      </Button>
+                  <div className="rounded-lg border p-6 bg-gradient-to-br from-blue-50 to-blue-100">
+                    <div className="space-y-4">
+                      <div>
+                        <h3 className="text-sm font-semibold text-blue-900 mb-2">
+                          Informasi Clustering
+                        </h3>
+                        <ul className="text-xs text-blue-800 space-y-1.5">
+                          <li className="flex items-start gap-2">
+                            <span className="text-blue-600">•</span>
+                            <span>Jumlah cluster (K) ditentukan otomatis oleh server</span>
+                          </li>
+                          <li className="flex items-start gap-2">
+                            <span className="text-blue-600">•</span>
+                            <span>Data berdasarkan agregasi per Kabupaten/Kota</span>
+                          </li>
+                          <li className="flex items-start gap-2">
+                            <span className="text-blue-600">•</span>
+                            <span>Hasil clustering akan otomatis tersimpan</span>
+                          </li>
+                        </ul>
+                      </div>
+
+                      <div className="pt-3 border-t border-blue-200">
+                        <Button
+                          onClick={handleRunClustering}
+                          disabled={clusterData.length === 0 || isProcessing}
+                          className="w-full gap-2 bg-blue-600 hover:bg-blue-700"
+                        >
+                          {isProcessing ? (
+                            <>
+                              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                              Processing...
+                            </>
+                          ) : (
+                            <>
+                              <Upload className="w-4 h-4" />
+                              Run Clustering & Update Map
+                            </>
+                          )}
+                        </Button>
+                        <p className="text-xs text-blue-700 mt-2 text-center">
+                          Hasil akan ditampilkan di halaman Peta
+                        </p>
+                      </div>
                     </div>
-                    <p className="text-xs text-gray-600 mt-3">
-                      Hasil FeatureCollection akan disimpan di localStorage dan dipakai halaman Peta.
-                    </p>
                   </div>
+                </div>
+
+                {/* Format Info */}
+                <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                  <h3 className="text-amber-900 font-medium mb-2 flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4" />
+                    Format Data Excel
+                  </h3>
+                  <p className="text-sm text-amber-800 mb-3">
+                    File Excel harus memiliki kolom berikut (urutan boleh berbeda):
+                  </p>
+                  <div className="grid md:grid-cols-3 gap-2 text-xs">
+                    {[
+                      "Kabupaten/Kota",
+                      "Freq_Total",
+                      "Max_MMI",
+                      "Avg_MMI",
+                      "pop_density",
+                      "sex_ratio",
+                      "vulnerable_age_ratio",
+                      "poverty_ratio",
+                      "disability_ratio",
+                    ].map((col) => (
+                      <div key={col} className="flex items-center gap-1">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded bg-white border border-amber-300 text-amber-900 font-mono">
+                          {col}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-amber-700 mt-3">
+                    💡 Tip: Gunakan koma (,) atau titik (.) sebagai pemisah desimal
+                  </p>
                 </div>
               </div>
             </div>
@@ -467,64 +563,6 @@ export default function AdminPage() {
             </div>
           )}
 
-          {/* Recent Events Tab */}
-          {activeTab === "recent" && (
-            <div className="space-y-4">
-              <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
-                <h2 className="text-gray-900 font-semibold mb-4">Recent Earthquake Events</h2>
-                {statistics.recentEvents.length === 0 ? (
-                  <div className="text-center py-12">
-                    <Calendar className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                    <p className="text-gray-500">No recent events found. Upload data to see recent earthquakes.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {statistics.recentEvents.map((event, index) => (
-                      <div key={index} className="p-4 rounded-xl border bg-white hover:shadow-sm transition-shadow">
-                        <div className="flex items-start gap-4">
-                          <div className="bg-red-100 p-3 rounded-lg">
-                            <MapPin className="w-5 h-5 text-red-600" />
-                          </div>
-                          <div className="flex-1">
-                            <div className="flex items-start justify-between mb-2">
-                              <h3 className="text-gray-900 font-medium">{event.location || "Unknown Location"}</h3>
-                              <span
-                                className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${parseFloat(event.magnitude || "0") >= 6
-                                  ? "bg-red-100 text-red-700"
-                                  : parseFloat(event.magnitude || "0") >= 5
-                                    ? "bg-blue-100 text-blue-700"
-                                    : "bg-gray-100 text-gray-700"
-                                  }`}
-                              >
-                                {event.magnitude || "N/A"} SR
-                              </span>
-                            </div>
-                            <div className="grid md:grid-cols-3 gap-3 text-sm text-gray-600">
-                              <div>
-                                <span className="text-gray-500">Date:</span> {event.date || "N/A"}
-                              </div>
-                              <div>
-                                <span className="text-gray-500">Time:</span> {event.time || "N/A"}
-                              </div>
-                              <div>
-                                <span className="text-gray-500">Depth:</span> {event.depth || "N/A"} km
-                              </div>
-                              <div>
-                                <span className="text-gray-500">Lat:</span> {event.latitude || "N/A"}
-                              </div>
-                              <div>
-                                <span className="text-gray-500">Lng:</span> {event.longitude || "N/A"}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

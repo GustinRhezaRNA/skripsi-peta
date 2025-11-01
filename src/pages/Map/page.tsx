@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { useClusters } from "../../hooks/useCluster";
-import { data as dummyData } from "../../const/data/data";
 import {
     MapContainer,
     TileLayer,
@@ -16,34 +14,34 @@ function ClusterDashboard() {
     const [baseLayer, setBaseLayer] = useState<string>("street");
 
     useEffect(() => {
-        // Load cached FeatureCollection if available
-        const cached = localStorage.getItem("clusterGeoJSON");
-        if (cached) {
+        const fetchCluster = async () => {
             try {
-                const parsed = JSON.parse(cached);
-                if (parsed && parsed.type === "FeatureCollection") {
-                    setGeoData(parsed);
-                }
-            } catch (_) { }
-        }
-
-        const fetchData = async () => {
-            const requestData = {
-                k: 3,
-                data: dummyData
-            };
-
-            try {
-                const res = await useClusters(requestData);
-                // Store GeoJSON data if it exists in the response
-                if (res.type === "FeatureCollection") {
-                    setGeoData(res);
+                const res = await fetch("http://127.0.0.1:8000/latest_cluster");
+                const data = await res.json();
+                if (data.type === "FeatureCollection") {
+                    setGeoData(data);
+                    console.log("✅ Cluster data loaded");
+                } else {
+                    console.warn("No valid cluster data found.");
                 }
             } catch (err) {
-                console.error("Error fetching cluster data:", err);
+                console.error("Error fetching latest cluster:", err);
             }
         };
-        fetchData();
+
+        fetchCluster();
+
+        // Listen for cluster updates from admin page
+        const handleClusterUpdate = () => {
+            console.log("🔄 Cluster updated, reloading data...");
+            fetchCluster();
+        };
+
+        window.addEventListener('clusterUpdated', handleClusterUpdate);
+
+        return () => {
+            window.removeEventListener('clusterUpdated', handleClusterUpdate);
+        };
     }, []);
 
     // Styling functions for GeoJSON
