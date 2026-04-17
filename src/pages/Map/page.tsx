@@ -3,10 +3,28 @@ import {
     MapContainer,
     TileLayer,
     GeoJSON,
+    useMap,
 } from "react-leaflet";
 import { Button } from "../../components/ui/button";
 import { Map as MapIcon, Layers, X } from "lucide-react";
+// @ts-ignore
+import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+
+// Component to set zoom control position
+function ZoomControlPosition() {
+    const map = useMap();
+
+    useEffect(() => {
+        // Remove default zoom control
+        map.zoomControl?.remove();
+
+        // Add new zoom control on the right
+        L.control.zoom({ position: 'topright' }).addTo(map);
+    }, [map]);
+
+    return null;
+}
 
 function ClusterDashboard() {
     const [geoData, setGeoData] = useState<any>(null);
@@ -18,20 +36,34 @@ function ClusterDashboard() {
             try {
                 const res = await fetch("http://127.0.0.1:8000/latest_cluster");
                 const data = await res.json();
-                if (data.type === "FeatureCollection") {
-                    setGeoData(data);
+
+                let geo = data.geojson || data;
+                if (typeof geo === "string") {
+                    try {
+                        geo = JSON.parse(geo);
+                    } catch (e) {
+                        console.error("❌ Failed to parse GeoJSON:", e);
+                    }
+                }
+
+                console.log("geoData example:", geo.features?.[0]?.properties);
+
+                // Ambil summary cluster (optional untuk debug)
+                const summaryRes = await fetch("http://127.0.0.1:8000/cluster_summary");
+                const summary = await summaryRes.json();
+                console.log("Cluster summary:", summary);
+
+                if (geo.type === "FeatureCollection") {
+                    setGeoData(geo);
                     console.log("✅ Cluster data loaded");
                 } else {
-                    console.warn("No valid cluster data found.");
+                    console.warn("⚠️ No valid cluster data found.");
                 }
             } catch (err) {
                 console.error("Error fetching latest cluster:", err);
             }
         };
-
         fetchCluster();
-
-        // Listen for cluster updates from admin page
         const handleClusterUpdate = () => {
             console.log("🔄 Cluster updated, reloading data...");
             fetchCluster();
@@ -62,19 +94,39 @@ function ClusterDashboard() {
         }
     };
 
+    // Fungsi untuk setiap fitur GeoJSON
     const onEachFeature = (feature: any, layer: any) => {
-        const name = feature.properties?.NAME_2 || "Unknown";
-        const cluster = feature.properties?.cluster || "No Cluster";
-        layer.bindPopup(`<b>${name}</b><br/>Cluster: ${cluster}`);
+        if (feature.properties) {
+            const { NAME_2, cluster, deskripsi } = feature.properties;
+            let info = `<b>${NAME_2}</b><br/>`;
+            info += cluster ? `Cluster: ${cluster}<br/>` : "Cluster: -<br/>";
+            info += deskripsi ? `<i>${deskripsi}</i>` : "<i>Tidak ada deskripsi</i>";
+            layer.bindPopup(info);
+        }
+
+        layer.on({
+            mouseover: (e: any) => {
+                e.target.setStyle({
+                    weight: 3,
+                    color: "#333",
+                    fillOpacity: 0.8,
+                });
+            },
+            mouseout: (e: any) => {
+                e.target.setStyle(style(feature));
+            },
+        });
     };
 
+
     const style = (feature: any) => ({
-        fillColor: getColor(feature.properties?.cluster),
+        fillColor: getColor(feature.properties.cluster),
         weight: 1,
         opacity: 1,
-        color: "#fff",
+        color: "white",
         fillOpacity: 0.7,
     });
+
 
     // Tile layers based on selection
     const { tileUrl, attribution } = useMemo(() => {
@@ -123,7 +175,12 @@ function ClusterDashboard() {
             <div className="relative flex-1 overflow-hidden">
                 {/* Map Area */}
                 <main className="absolute inset-0">
-                    <MapContainer center={[-7.0909, 107.6689] as [number, number]} zoom={8} className="h-full w-full">
+                    <MapContainer
+                        center={[-7.0909, 107.6689] as [number, number]}
+                        zoom={8}
+                        className="h-full w-full"
+                    >
+                        <ZoomControlPosition />
                         <TileLayer url={tileUrl} attribution={attribution} />
                         {geoData && (
                             <GeoJSON
@@ -143,8 +200,8 @@ function ClusterDashboard() {
 
                     {/* Toggle Sidebar Button */}
                     {!isOpen && (
-                        <div className="absolute top-4 left-4 z-[1000]">
-                            <Button variant="secondary" onClick={() => setIsOpen(true)} className="shadow">
+                        <div className="absolute bottom-4 left-4 z-[1000]">
+                            <Button onClick={() => setIsOpen(true)} className="bg-white text-black">
                                 Panel
                             </Button>
                         </div>
@@ -207,10 +264,6 @@ function ClusterDashboard() {
                                     <div className="flex items-center gap-2">
                                         <span className="inline-block w-4 h-4 bg-blue-500" />
                                         <span>Cluster 2</span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <span className="inline-block w-4 h-4 bg-green-500" />
-                                        <span>Cluster 3</span>
                                     </div>
                                 </div>
                             </div>

@@ -7,7 +7,6 @@ import {
   Download,
   Upload,
   AlertCircle,
-  Calendar,
   LogOut,
   FileSpreadsheet,
 } from "lucide-react";
@@ -27,22 +26,6 @@ type EarthquakeData = {
 
 type Message = { type: "success" | "error" | "info"; text: string; description?: string } | null;
 
-function parseCSV(content: string): EarthquakeData[] {
-  const lines = content.split(/\r?\n/).filter(Boolean);
-  if (lines.length === 0) return [];
-  const headers = lines[0].split(",").map((h) => h.trim());
-  const rows = lines.slice(1);
-  const data: EarthquakeData[] = rows.map((line) => {
-    // naive CSV split, does not handle quoted commas
-    const cols = line.split(",");
-    const obj: EarthquakeData = {};
-    headers.forEach((h, i) => {
-      obj[h] = (cols[i] ?? "").trim();
-    });
-    return obj;
-  });
-  return data;
-}
 
 export default function AdminPage() {
   const navigate = useNavigate();
@@ -70,38 +53,6 @@ export default function AdminPage() {
     }
   };
 
-  const handleDownloadTemplate = () => {
-    const template =
-      "date,time,latitude,longitude,magnitude,depth,location\n" +
-      "2025-01-15,14:30:00,-6.2088,106.8456,5.2,10,Jakarta\n" +
-      "2025-01-14,09:15:00,-7.7956,110.3695,4.8,15,Yogyakarta";
-    const blob = new Blob([template], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "earthquake_data_template.csv";
-    a.click();
-    URL.revokeObjectURL(url);
-    showMessage({ type: "success", text: "Template downloaded" });
-  };
-
-  const handleFileUpload = async (file: File) => {
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const res = await fetch("https://127.0.0.1:8000/upload-cluster", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-    console.log(data);
-    showMessage({
-      type: "success",
-      text: "Upload & Clustering Done",
-      description: `${data.count} items processed.`,
-    });
-  };
 
   const handleClusterFileUpload = async (file: File) => {
     try {
@@ -313,13 +264,11 @@ export default function AdminPage() {
           </div>
         </div>
 
-
         {/* Tabs */}
         <div>
           <div className="mb-6 inline-flex rounded-lg border bg-white p-1">
             {([
               { id: "upload", label: "Upload Data", icon: Upload },
-              { id: "data", label: "View Data", icon: Database },
             ] as const).map((tab) => (
               <button
                 key={tab.id}
@@ -433,10 +382,6 @@ export default function AdminPage() {
                         <ul className="text-xs text-blue-800 space-y-1.5">
                           <li className="flex items-start gap-2">
                             <span className="text-blue-600">•</span>
-                            <span>Jumlah cluster (K) ditentukan otomatis oleh server</span>
-                          </li>
-                          <li className="flex items-start gap-2">
-                            <span className="text-blue-600">•</span>
                             <span>Data berdasarkan agregasi per Kabupaten/Kota</span>
                           </li>
                           <li className="flex items-start gap-2">
@@ -507,62 +452,6 @@ export default function AdminPage() {
               </div>
             </div>
           )}
-
-          {/* Data Tab */}
-          {activeTab === "data" && (
-            <div className="space-y-4">
-              <div className="p-6 rounded-xl bg-white border border-gray-100 shadow-sm">
-                <div className="flex items-center justify-between mb-6">
-                  <div>
-                    <h2 className="text-gray-900 font-semibold mb-1">Earthquake Data Records</h2>
-                    <p className="text-sm text-gray-600">View, search, and manage all uploaded earthquake data</p>
-                  </div>
-                  {earthquakeData.length > 0 && (
-                    <Button variant="outline" onClick={handleExportData} className="gap-2">
-                      <Download className="w-4 h-4" />
-                      Export Data
-                    </Button>
-                  )}
-                </div>
-
-                {earthquakeData.length === 0 ? (
-                  <div className="text-center py-12 text-gray-500">No data. Upload a CSV first.</div>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-sm">
-                      <thead>
-                        <tr className="text-left bg-gray-50">
-                          {Object.keys(earthquakeData[0]).map((h) => (
-                            <th key={h} className="px-3 py-2 font-medium text-gray-700 border-b">
-                              {h}
-                            </th>
-                          ))}
-                          <th className="px-3 py-2 font-medium text-gray-700 border-b">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {earthquakeData.map((row, idx) => (
-                          <tr key={idx} className="border-b hover:bg-gray-50">
-                            {Object.keys(earthquakeData[0]).map((h) => (
-                              <td key={h} className="px-3 py-2 text-gray-800">
-                                {row[h]}
-                              </td>
-                            ))}
-                            <td className="px-3 py-2">
-                              <Button variant="ghost" className="text-red-600" onClick={() => handleDeleteRecord(idx)}>
-                                Delete
-                              </Button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
         </div>
       </div>
     </div>
